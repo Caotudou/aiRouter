@@ -1,6 +1,6 @@
 # AI Router
 
-Tauri + Rust 桌面应用，将本机已通过 ChatGPT 登录的 Codex 接到腾讯 WorkBuddy 的自定义模型入口。Windows 版本已构建和验证；macOS 源码已适配，尚未在 Mac 上构建或测试。
+Tauri + Rust 桌面应用，将本机已通过 ChatGPT 登录的 Codex 接到腾讯 WorkBuddy 的自定义模型入口。Windows 版本本机编译；macOS Apple Silicon 包通过 GitHub Actions 原生构建，运行行为仍需在 Mac 上验证。
 
 ```text
 WorkBuddy → http://127.0.0.1:18321/v1 → AI Router → codex app-server → OpenAI
@@ -11,7 +11,7 @@ WorkBuddy → http://127.0.0.1:18321/v1 → AI Router → codex app-server → O
 ## 使用
 
 1. 在本机 Codex 中使用 ChatGPT 登录。终端运行 `codex login status` 可检查状态。
-2. 打开 `dist/AI-Router-0.2.6-Tauri-Windows.exe`。Windows 需有 Microsoft Edge WebView2 Runtime。
+2. 打开 `dist/AI-Router-0.2.7-Tauri-Windows.exe`。Windows 需有 Microsoft Edge WebView2 Runtime。
 3. 在 AI Router 点击 **启动服务**，再点击 **测试连接**。测试会产生一条真实 Codex 请求。
 4. WorkBuddy → 设置 → 模型 → 自定义 API / Custom，选择 OpenAI 兼容协议：
 
@@ -29,7 +29,7 @@ WorkBuddy → http://127.0.0.1:18321/v1 → AI Router → codex app-server → O
 
 在“模型与推理强度”中选择当前账户目录里的模型和它支持的强度，点击“应用选择”后新请求立即生效。也可以在 WorkBuddy 填写具体模型名，届时客户端指定的模型优先；客户端明确指定的推理强度也会优先。目录不代表所有请求均获授权，实际推理结果决定是否可用。
 
-关闭 AI Router 窗口即停止服务。首版没有系统托盘、后台常驻、开机启动、多账户或局域网分享。
+关闭窗口会将应用收到系统托盘，已启动的服务会继续运行。可从托盘菜单重新打开窗口，或选择“退出并停止服务”完全退出。应用目前不会随系统登录自动启动。
 
 ## 当前验证情况
 
@@ -37,6 +37,7 @@ WorkBuddy → http://127.0.0.1:18321/v1 → AI Router → codex app-server → O
 - 真实接口测试：文本回答、SSE 流式输出、动态工具调用及工具结果回传通过。
 - Rust HTTP 测试使用模拟 Codex 覆盖鉴权、会话延续、并行工具结果、异常和 SSE；旧版 JavaScript 测试单独保留。
 - Windows Tauri 窗口已验证账号读取、服务启动、停止和重启；旧版 WorkBuddy 的本机密钥已验证可访问新版模型列表。
+- Windows 0.2.7 发布构建已包含系统托盘常驻和退出时的服务清理。
 - **尚未在 WorkBuddy 客户端内完成端到端联调**。本版本是可运行的协议适配实验版，不保证所有 WorkBuddy 工具与模型参数兼容。
 
 ## 接口和兼容范围

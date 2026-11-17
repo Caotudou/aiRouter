@@ -1,6 +1,6 @@
 [package]
 name = "ai-router-core"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2021"
 publish = false
 build = "build.rs"
@@ -16,7 +16,7 @@ futures-util = "0.3"
 subtle = "2"
 regex = "1"
 serde = { version = "1", features = ["derive"] }
-tauri = { version = "2", optional = true }
+tauri = { version = "2", features = ["tray-icon"], optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
 tauri-plugin-clipboard-manager = { version = "2", optional = true }
 keyring = { version = "3", features = ["windows-native", "apple-native"], optional = true }

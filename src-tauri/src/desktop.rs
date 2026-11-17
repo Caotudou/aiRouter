@@ -10,10 +10,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
-use tauri::{Manager, State};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Manager, State, WindowEvent,
+};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -51,7 +58,11 @@ struct Core {
     error: Option<String>,
     logs: Vec<Value>,
 }
-struct AppState(Mutex<Core>);
+struct AppState {
+    core: Mutex<Core>,
+    exit_started: AtomicBool,
+    exit_complete: AtomicBool,
+}
 impl Core {
     fn new(directory: PathBuf) -> Result<Self, String> {
         std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
@@ -209,17 +220,17 @@ impl Core {
 
 #[tauri::command]
 async fn router_status(state: State<'_, AppState>) -> Result<Value, String> {
-    Ok(state.0.lock().await.status().await)
+    Ok(state.core.lock().await.status().await)
 }
 #[tauri::command]
 async fn router_refresh(state: State<'_, AppState>) -> Result<Value, String> {
-    let mut c = state.0.lock().await;
+    let mut c = state.core.lock().await;
     c.refresh().await;
     Ok(c.status().await)
 }
 #[tauri::command]
 async fn router_start(state: State<'_, AppState>) -> Result<Value, String> {
-    let mut c = state.0.lock().await;
+    let mut c = state.core.lock().await;
     if c.server.is_none() {
         c.refresh().await;
         if let Some(e) = &c.error {
@@ -242,7 +253,7 @@ async fn router_start(state: State<'_, AppState>) -> Result<Value, String> {
 }
 #[tauri::command]
 async fn router_stop(state: State<'_, AppState>) -> Result<Value, String> {
-    let mut c = state.0.lock().await;
+    let mut c = state.core.lock().await;
     c.stop().await;
     Ok(c.status().await)
 }
@@ -251,7 +262,7 @@ async fn router_save(
     state: State<'_, AppState>,
     settings: ConnectionSettings,
 ) -> Result<Value, String> {
-    let mut c = state.0.lock().await;
+    let mut c = state.core.lock().await;
     if c.server.is_some() {
         return Err("请先停止服务再修改设置。".into());
     }
@@ -284,7 +295,7 @@ async fn router_set_defaults(
     if model.is_empty() || model == "codex-local" || effort.is_empty() {
         return Err("请选择有效的模型和推理强度。".into());
     }
-    let mut c = state.0.lock().await;
+    let mut c = state.core.lock().await;
     let mut updated = c.settings.clone();
     updated.default_model = model.into();
     updated.default_reasoning_effort = effort.into();
@@ -301,7 +312,7 @@ async fn router_set_defaults(
 #[tauri::command]
 async fn router_test(state: State<'_, AppState>) -> Result<String, String> {
     let (port, token) = {
-        let c = state.0.lock().await;
+        let c = state.core.lock().await;
         if c.server.is_none() {
             return Err("请先启动服务。".into());
         }
@@ -330,7 +341,7 @@ async fn router_copy(
     state: State<'_, AppState>,
     field: String,
 ) -> Result<(), String> {
-    let c = state.0.lock().await;
+    let c = state.core.lock().await;
     let value = match field.as_str() {
         "url" => format!("http://127.0.0.1:{}/v1", c.settings.port),
         "key" => c.token.clone(),
@@ -358,14 +369,56 @@ async fn router_choose_binary(app: tauri::AppHandle) -> Result<Option<String>, S
 }
 
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             let path = app.path().app_data_dir()?;
             let core = Core::new(path).map_err(std::io::Error::other)?;
-            app.manage(AppState(Mutex::new(core)));
+            app.manage(AppState {
+                core: Mutex::new(core),
+                exit_started: AtomicBool::new(false),
+                exit_complete: AtomicBool::new(false),
+            });
+
+            let show = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "退出并停止服务", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &quit])?;
+            let icon = app
+                .default_window_icon()
+                .cloned()
+                .ok_or_else(|| std::io::Error::other("找不到 AI Router 托盘图标"))?;
+
+            TrayIconBuilder::with_id("main")
+                .icon(icon)
+                .tooltip("AI Router 后台服务")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "show" => show_main_window(app),
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if matches!(
+                        event,
+                        TrayIconEvent::Click {
+                            button: MouseButton::Left,
+                            button_state: MouseButtonState::Up,
+                            ..
+                        }
+                    ) {
+                        show_main_window(tray.app_handle());
+                    }
+                })
+                .build(app)?;
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             router_status,
@@ -378,8 +431,38 @@ pub fn run() {
             router_copy,
             router_choose_binary
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("AI Router 启动失败");
+
+    app.run(|app, event| {
+        if let tauri::RunEvent::ExitRequested { api, .. } = event {
+            let state = app.state::<AppState>();
+            if state.exit_complete.load(Ordering::Acquire) {
+                return;
+            }
+
+            api.prevent_exit();
+            if state.exit_started.swap(true, Ordering::AcqRel) {
+                return;
+            }
+
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let state = app.state::<AppState>();
+                state.core.lock().await.stop().await;
+                state.exit_complete.store(true, Ordering::Release);
+                app.exit(0);
+            });
+        }
+    });
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
 }
 
 #[cfg(test)]
