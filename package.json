@@ -1,0 +1,43 @@
+{
+  "name": "ai-router-desktop",
+  "version": "0.1.2",
+  "private": true,
+  "description": "Local Codex bridge for WorkBuddy",
+  "type": "module",
+  "main": "desktop/main.mjs",
+  "scripts": {
+    "start": "electron .",
+    "service": "node scripts/service.mjs",
+    "test": "node --test test/*.test.mjs",
+    "smoke:real": "node scripts/smoke-real.mjs",
+    "tauri:dev": "tauri dev --features desktop",
+    "tauri:build": "tauri build --features desktop",
+    "test:rust-bridge": "node scripts/test-rust-bridge.mjs",
+    "pack": "electron-builder --win --dir",
+    "dist": "electron-builder --win portable"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.5",
+    "electron": "45.3.3",
+    "electron-builder": "26.18.0"
+  },
+  "build": {
+    "appId": "local.airouter.desktop",
+    "productName": "AI Router",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "desktop/**",
+      "src/**",
+      "package.json"
+    ],
+    "win": {
+      "target": "portable",
+      "signAndEditExecutable": false
+    },
+    "portable": {
+      "artifactName": "AI-Router-${version}-Windows.exe"
+    }
+  }
+}

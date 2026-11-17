@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.local/
+.codebase-memory/
+src-tauri/target/
+*.log

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self' data:; object-src 'none'; base-uri 'none'">
+  <title>AI Router</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="tauri.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-symbol">↗</span><span>AI Router<small>LOCAL CODEX BRIDGE</small></span></div>
+    <div class="nav-label">工作空间</div>
+    <div class="nav-item" aria-current="page"><span>◈</span> 服务控制台</div>
+    <div class="sidebar-bottom"><span class="local-dot"></span> 仅本机连接<small>Desktop · v0.2.3</small></div>
+  </aside>
+  <main>
+    <header><div><div class="eyebrow">CODEX × WORKBUDDY</div><h1>让本机 Codex，接入工作流。</h1><p>使用已登录的 ChatGPT 账户，为 WorkBuddy 提供模型服务。</p></div><button id="refresh" class="secondary">刷新状态 ↻</button></header>
+    <div id="message" role="status" aria-live="polite" hidden></div>
+    <section class="service panel" aria-labelledby="service-title">
+      <div class="service-top"><div><div class="section-kicker">本机模型服务</div><h2 id="service-title"><span id="service-dot" class="status-dot"></span><span id="service-state">服务未启动</span></h2><p id="service-description">启动后，将下方接入信息填写到 WorkBuddy。</p></div><button id="toggle" class="primary">启动服务 <span>↗</span></button></div>
+      <div class="connection-path"><span>WorkBuddy</span><span class="line">→</span><span class="path-active">AI Router</span><span class="line">→</span><span>本机 Codex</span><span class="path-tag">ChatGPT 额度</span></div>
+    </section>
+    <div class="two-column">
+      <section class="panel account"><div class="panel-title"><h2>Codex 账户</h2><span id="account-tag" class="tag">读取中</span></div><div id="account-plan" class="large-value">—</div><p id="account-description">正在检查本机登录状态…</p><div id="quota" class="quota"><p>额度信息尚未读取</p></div><p class="footnote">用量与本机 Codex 共用，按服务返回的窗口展示。</p></section>
+      <section class="panel connect"><div class="panel-title"><h2>接入 WorkBuddy</h2><button id="copy-all" class="text-button">复制全部 ↗</button></div><p>设置 → 模型 → 自定义 API / Custom</p><div class="config-row"><label>Base URL</label><div><code id="base-url">http://127.0.0.1:18321/v1</code><button class="copy" data-copy="url" aria-label="复制 Base URL">复制</button></div></div><div class="config-row"><label>API Key</label><div><code>本机专用密钥 · ••••••••</code><button class="copy" data-copy="key" aria-label="复制本机 API Key">复制</button></div></div><div class="config-row"><label>模型名称</label><div><code id="model-name">gpt-6.1-sol</code><button class="copy" data-copy="model" aria-label="复制模型名称">复制</button></div></div><p class="footnote">选择 OpenAI 兼容协议，启用工具调用。默认推理强度：高（high）。</p></section>
+    </div>
+    <section class="panel verification"><div><h2>验证接入链路</h2><p id="test-result">发送一条简短请求，检查 Codex 是否能正常响应。会使用少量额度。</p></div><button id="test" class="secondary" disabled>测试连接 →</button></section>
+    <details class="panel settings"><summary>连接设置与运行记录 <span>＋</span></summary><div class="settings-grid"><label>服务端口<input id="port" type="number" min="1024" max="65535" value="18321"></label><label>Codex 程序路径<div class="input-group"><input id="binary" value="codex" spellcheck="false"><button id="browse" class="secondary">选择</button></div></label><button id="save" class="secondary">保存设置</button></div><p id="resolved-binary" class="footnote"></p><p class="footnote">修改设置前请先停止服务。关闭窗口会停止本机服务。</p><div class="log-heading">最近运行记录 <span id="sessions">0 个会话</span></div><div id="logs" class="logs">暂无运行记录</div></details>
+    <footer><span>● 本机转接 · 模型推理仍通过网络访问 OpenAI</span><span>实验版 · 支持文本、图片与工具调用</span></footer>
+  </main>
+</body>
+</html>

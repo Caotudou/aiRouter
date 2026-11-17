@@ -1,0 +1,46 @@
+[package]
+name = "ai-router-core"
+version = "0.2.3"
+edition = "2021"
+publish = false
+build = "build.rs"
+
+[dependencies]
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "macros", "process", "rt-multi-thread", "sync", "time", "net", "fs"] }
+uuid = { version = "1", features = ["v4"] }
+axum = "0.8"
+tokio-stream = "0.1"
+futures-util = "0.3"
+subtle = "2"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2", optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
+tauri-plugin-clipboard-manager = { version = "2", optional = true }
+keyring = { version = "3", features = ["windows-native", "apple-native"], optional = true }
+base64 = { version = "0.22", optional = true }
+aes-gcm = { version = "0.10", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"], optional = true }
+
+[build-dependencies]
+tauri-build = { version = "2", optional = true }
+
+[features]
+desktop = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-dialog", "dep:tauri-plugin-clipboard-manager", "dep:keyring", "dep:base64", "dep:aes-gcm", "dep:windows-sys"]
+
+[[bin]]
+name = "ai-router"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[lib]
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+strip = true
