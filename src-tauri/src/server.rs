@@ -176,6 +176,7 @@ async fn handle(State(api): State<Api>, req: Request) -> Response {
         Ok(Value::Object(v)) => Value::Object(v),
         _ => return error(400, "invalid_json", "请求必须是有效 JSON 对象。"),
     };
+    let body = api.bridge.apply_defaults(body);
     if body["stream"] != true {
         let (delta_tx, _delta_rx) = mpsc::unbounded_channel();
         let bridge = api.bridge.clone();

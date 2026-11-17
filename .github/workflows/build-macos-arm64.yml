@@ -1,0 +1,48 @@
+name: Build macOS Apple Silicon package
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/macos-m1-package
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # GitHub's macos-15 standard runner is an Apple Silicon M1 arm64 host.
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust target
+        run: rustup target add aarch64-apple-darwin
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Apple Silicon DMG
+        run: npm run tauri:build -- --target aarch64-apple-darwin --bundles dmg
+
+      - name: Verify architecture and checksum
+        shell: bash
+        run: |
+          file src-tauri/target/aarch64-apple-darwin/release/ai-router
+          shasum -a 256 src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg \
+            > src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AI-Router-0.2.6-macOS-M1
+          path: |
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14

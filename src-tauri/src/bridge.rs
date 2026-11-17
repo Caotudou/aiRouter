@@ -59,45 +59,39 @@ struct SessionEntry {
     state: Mutex<Session>,
 }
 
-// A streaming client may reserialize the content of the immediately previous
-// assistant tool-call message. Its tool calls and complete result IDs must still
-// match the live session exactly; all earlier history remains strict.
-fn matches_pending_tool_results(history: &[Value], messages: &[Value], session: &Session) -> bool {
-    let Some(last) = history.len().checked_sub(1) else {
-        return false;
-    };
-    if messages.len() <= history.len() || history[..last] != messages[..last] {
-        return false;
+#[derive(Clone, Debug)]
+pub struct RoutingDefaults {
+    pub model: String,
+    pub reasoning_effort: String,
+}
+impl Default for RoutingDefaults {
+    fn default() -> Self {
+        Self {
+            model: DEFAULT_MODEL.into(),
+            reasoning_effort: DEFAULT_REASONING_EFFORT.into(),
+        }
     }
-    let expected = &history[last];
-    let actual = &messages[last];
-    if expected["role"] != "assistant"
-        || actual["role"] != "assistant"
-        || expected.get("name") != actual.get("name")
-        || expected.get("tool_calls") != actual.get("tool_calls")
-        || !expected
-            .get("tool_calls")
-            .and_then(Value::as_array)
-            .is_some_and(|v| !v.is_empty())
-    {
-        return false;
+}
+
+// Codex tool RPCs are correlated by their generated call IDs. WorkBuddy may
+// trim or reorder earlier messages; the most recent result for each live ID is
+// authoritative regardless of the rest of the client-provided history.
+fn pending_result_indices(messages: &[Value], session: &Session) -> Vec<usize> {
+    let mut seen = std::collections::HashSet::new();
+    let mut indices = Vec::new();
+    for (index, message) in messages.iter().enumerate().rev() {
+        if message["role"] != "tool" {
+            continue;
+        }
+        let Some(id) = message["tool_call_id"].as_str() else {
+            continue;
+        };
+        if session.pending.get(id).is_some_and(|p| p.reported) && seen.insert(id) {
+            indices.push(index);
+        }
     }
-    let pending: std::collections::HashSet<&str> = session
-        .pending
-        .iter()
-        .filter(|(_, value)| value.reported)
-        .map(|(id, _)| id.as_str())
-        .collect();
-    let incoming = &messages[history.len()..];
-    let ids: std::collections::HashSet<&str> = incoming
-        .iter()
-        .filter(|m| m["role"] == "tool")
-        .filter_map(|m| m["tool_call_id"].as_str())
-        .collect();
-    !pending.is_empty()
-        && incoming.len() == pending.len()
-        && ids.len() == incoming.len()
-        && ids == pending
+    indices.reverse();
+    indices
 }
 
 // An old conversation can be reconstructed as text only after its tools have
@@ -139,6 +133,7 @@ pub struct Bridge {
     logs: Mutex<Vec<Value>>,
     diagnostics: Option<Arc<Diagnostics>>,
     instance_id: String,
+    defaults: std::sync::RwLock<RoutingDefaults>,
 }
 
 impl Bridge {
@@ -164,7 +159,38 @@ impl Bridge {
             logs: Mutex::new(Vec::new()),
             diagnostics,
             instance_id,
+            defaults: std::sync::RwLock::new(RoutingDefaults::default()),
         }
+    }
+    pub fn set_defaults(&self, defaults: RoutingDefaults) {
+        if let Ok(mut current) = self.defaults.write() {
+            *current = defaults;
+        }
+    }
+    /// Resolve aliases and fill missing values, preserving explicit client choices.
+    pub fn apply_defaults(&self, mut body: Value) -> Value {
+        let defaults = self.defaults.read().map(|v| v.clone()).unwrap_or_default();
+        let use_default = body
+            .get("model")
+            .and_then(Value::as_str)
+            .map_or(true, |model| model == "codex-local");
+        let has_effort = body
+            .get("reasoning_effort")
+            .and_then(Value::as_str)
+            .is_some()
+            || body
+                .pointer("/reasoning/effort")
+                .and_then(Value::as_str)
+                .is_some();
+        if let Some(object) = body.as_object_mut() {
+            if use_default {
+                object.insert("model".into(), json!(defaults.model));
+            }
+            if !has_effort {
+                object.insert("reasoning_effort".into(), json!(defaults.reasoning_effort));
+            }
+        }
+        body
     }
     fn diagnostic(&self, event: &'static str, mut data: Value) {
         if let Some(log) = &self.diagnostics {
@@ -222,9 +248,10 @@ impl Bridge {
         body: Value,
         deltas: Option<mpsc::UnboundedSender<String>>,
     ) -> Result<Value, BridgeError> {
+        let body = self.apply_defaults(body);
         let messages = protocol::normalize_messages(&body["messages"])
             .map_err(|e| BridgeError::invalid(e.to_string()))?;
-        if body.get("n").is_some_and(|n| n != 1) {
+        if body.get("n").is_some_and(|n| !n.is_null() && n != 1) {
             return Err(BridgeError::invalid("仅支持 n=1。"));
         }
         if body.get("stream").is_some_and(|v| !v.is_boolean()) {
@@ -235,7 +262,11 @@ impl Bridge {
                 return Err(BridgeError::invalid(format!("首版不支持 {key}。")));
             }
         }
-        let tools = body.get("tools").cloned().unwrap_or(json!([]));
+        let tools = body
+            .get("tools")
+            .filter(|v| !v.is_null())
+            .cloned()
+            .unwrap_or(json!([]));
         let choice = body
             .get("tool_choice")
             .filter(|v| !v.is_null())
@@ -257,19 +288,6 @@ impl Bridge {
             .and_then(Value::as_str)
             .or_else(|| body.pointer("/reasoning/effort").and_then(Value::as_str))
             .unwrap_or(DEFAULT_REASONING_EFFORT);
-        let models = self.models().await?;
-        let descriptor = models
-            .iter()
-            .find(|m| m["model"] == model)
-            .ok_or_else(|| BridgeError::invalid(format!("当前 Codex 目录中未找到模型：{model}")))?;
-        if !descriptor["supportedReasoningEfforts"]
-            .as_array()
-            .is_some_and(|v| v.iter().any(|e| e["reasoningEffort"] == effort))
-        {
-            return Err(BridgeError::invalid(format!(
-                "模型不支持推理强度：{effort}"
-            )));
-        }
         let identity = json!({"model":model,"tools":tools,"choice":choice.unwrap_or("auto")});
         self.cleanup_expired().await;
         let selected = {
@@ -304,10 +322,9 @@ impl Bridge {
                             .filter(|id| s.pending.contains_key(*id))
                             .count()
                     });
-                    if entry.identity == identity
-                        && state
-                            .as_ref()
-                            .is_some_and(|s| matches_pending_tool_results(&history, &messages, s))
+                    if state
+                        .as_ref()
+                        .is_some_and(|s| !pending_result_indices(&messages, s).is_empty())
                     {
                         pending_match_count += 1;
                         pending_match = Some(entry.clone());
@@ -323,11 +340,15 @@ impl Bridge {
                     }
                 }
             }
-            let match_kind = if best.is_some() {
-                "exact"
-            } else if pending_match_count == 1 {
+            let match_kind = if pending_match_count == 1 {
                 best = pending_match;
                 "pending_tool"
+            } else if pending_match_count > 1 {
+                return Err(BridgeError::failure(
+                    "工具调用 ID 与多个活动会话匹配，无法确定结果归属。",
+                ));
+            } else if best.is_some() {
+                "exact"
             } else {
                 "none"
             };
@@ -344,18 +365,8 @@ impl Bridge {
         let entry = if let Some(s) = selected {
             s
         } else {
-            if messages.iter().any(|m| m["role"] == "tool") && !can_replay_finished_tools(&messages)
-            {
-                self.diagnostic(
-                    "session_not_found",
-                    json!({"reason":"tool_results_without_matching_live_session"}),
-                );
-                return Err(BridgeError {
-                    status: 409,
-                    code: "tool_session_expired",
-                    message: "工具会话已过期，请新建 WorkBuddy 任务。".into(),
-                });
-            }
+            // If the process restarted or a session expired, rebuild context
+            // from WorkBuddy's supplied history without re-executing tools.
             let events = self.rpc.subscribe();
             let systems = messages
                 .iter()
@@ -391,8 +402,8 @@ impl Bridge {
             code: "conversation_busy",
             message: "同一对话已有请求运行中。".into(),
         })?;
-        let incoming = &messages[s.history.len()..];
-        if !s.history.is_empty() && incoming.is_empty() {
+        let incoming = messages.get(s.history.len()..).unwrap_or(&[]);
+        if s.pending.is_empty() && !s.history.is_empty() && incoming.is_empty() {
             return Err(BridgeError {
                 status: 409,
                 code: "duplicate_request",
@@ -401,24 +412,48 @@ impl Bridge {
         }
         if !s.pending.is_empty() {
             let expected = s.pending.values().filter(|p| p.reported).count();
-            let ids: std::collections::HashSet<&str> = incoming
-                .iter()
-                .filter_map(|m| m["tool_call_id"].as_str())
-                .collect();
-            if incoming.len() != expected
-                || ids.len() != expected
-                || incoming.iter().any(|m| {
-                    m["role"] != "tool"
-                        || !m["tool_call_id"]
-                            .as_str()
-                            .is_some_and(|id| s.pending.get(id).is_some_and(|p| p.reported))
-                })
-            {
-                return Err(BridgeError::invalid(
-                    "请完整回传上一轮所有 tool_calls 的结果。",
-                ));
+            let indices = pending_result_indices(&messages, &s);
+            if indices.len() != expected || expected == 0 {
+                self.diagnostic("tool_results_invalid",json!({"expected_count":expected,"matched_count":indices.len(),"incoming_count":incoming.len()}));
+                return Err(BridgeError::invalid("Codex 正在等待其余工具执行结果。"));
             }
-            for m in incoming {
+            let last_result = *indices.last().unwrap();
+            let new_messages = messages[last_result + 1..]
+                .iter()
+                .filter(|m| m["role"] == "user")
+                .cloned()
+                .collect::<Vec<_>>();
+            if !new_messages.is_empty() {
+                let input = protocol::user_input(&new_messages);
+                if input.is_empty() {
+                    return Err(BridgeError::invalid("追加的用户消息没有内容。"));
+                }
+                let turn_id = s.turn_id.clone().ok_or_else(|| {
+                    BridgeError::failure("当前 Codex 任务没有可追加消息的 turn ID。")
+                })?;
+                let steer = self
+                    .rpc
+                    .request(
+                        "turn/steer",
+                        json!({"threadId":s.id,"expectedTurnId":turn_id,"input":input}),
+                    )
+                    .await;
+                if let Err(error) = steer {
+                    self.diagnostic("session_removed", json!({"reason":"steer_failed"}));
+                    self.dispose(&mut s).await;
+                    drop(s);
+                    self.remove(&entry).await;
+                    return Err(BridgeError::failure(format!(
+                        "无法向当前 Codex 任务追加用户消息：{error}"
+                    )));
+                }
+                self.diagnostic(
+                    "turn_steered",
+                    json!({"user_message_count":new_messages.len(),"tool_result_count":indices.len()}),
+                );
+            }
+            for index in indices {
+                let m = &messages[index];
                 let pending = s
                     .pending
                     .remove(m["tool_call_id"].as_str().unwrap())
@@ -438,11 +473,6 @@ impl Bridge {
                 }
             }
         } else {
-            if incoming.iter().any(|m| m["role"] == "tool")
-                && !(s.history.is_empty() && can_replay_finished_tools(incoming))
-            {
-                return Err(BridgeError::invalid("没有对应的待处理工具调用。"));
-            }
             let input = protocol::user_input(incoming);
             if input.is_empty() {
                 self.dispose(&mut s).await;

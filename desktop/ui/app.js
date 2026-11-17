@@ -1,8 +1,40 @@
 const $ = id => document.getElementById(id);
-let state, working = false;
+let state, working = false, draft = null;
 function show(message, error = false) { $('message').hidden = false; $('message').textContent = message; $('message').classList.toggle('error', error); }
+const effortLabels = { minimal:'最低', low:'低', medium:'中', high:'高', xhigh:'极高', max:'最高', ultra:'超高' };
+function replaceOptions(select, entries, selected) {
+  const signature = JSON.stringify(entries);
+  if (select.dataset.signature !== signature) {
+    select.replaceChildren(...entries.map(([value,label]) => { const option = document.createElement('option'); option.value=value; option.textContent=label; return option; }));
+    select.dataset.signature = signature;
+  }
+  if (select.value !== selected) select.value = selected;
+}
+function renderDefaults(s) {
+  const available = typeof window.router.setDefaults === 'function';
+  $('model-settings').hidden = !available;
+  if (!available) return;
+  const models = Array.isArray(s.models) ? s.models.filter(m => typeof m.model === 'string' && m.model) : [];
+  const model = draft?.model || s.defaultModel;
+  const entries = models.map(m => [m.model, m.displayName && m.displayName !== m.model ? `${m.displayName} (${m.model})` : m.model]);
+  if (!entries.some(([value]) => value === model)) entries.unshift([model, model]);
+  replaceOptions($('default-model'), entries, model);
+  const descriptor = models.find(m => m.model === model);
+  const efforts = (descriptor?.supportedReasoningEfforts || []).map(e => typeof e === 'string' ? e : e?.reasoningEffort).filter(Boolean);
+  let effort = draft?.effort || s.defaultReasoningEffort;
+  if (efforts.length && !efforts.includes(effort)) {
+    effort = efforts.includes(descriptor?.defaultReasoningEffort) ? descriptor.defaultReasoningEffort : efforts[0];
+    if (draft) draft.effort = effort;
+  }
+  if (!efforts.length) efforts.push(effort);
+  replaceOptions($('default-effort'), efforts.map(value => [value, `${effortLabels[value] || value}（${value}）`]), effort);
+  $('default-model').disabled = working;
+  $('default-effort').disabled = working;
+  $('apply-defaults').disabled = working || !draft || (model === s.defaultModel && effort === s.defaultReasoningEffort);
+}
 function render(s) {
   state = s;
+  renderDefaults(s);
   $('service-state').textContent = s.running ? '服务运行中' : '服务未启动';
   $('service-dot').classList.toggle('running', s.running);
   $('service-description').textContent = s.running ? `正在监听本机端口 ${s.port}，可接收 WorkBuddy 请求。` : '启动后，将下方接入信息填写到 WorkBuddy。';
@@ -10,10 +42,11 @@ function render(s) {
   $('toggle').classList.toggle('stop', s.running);
   $('test').disabled = !s.running || working;
   $('base-url').textContent = s.baseUrl;
-  $('model-name').textContent = s.defaultModel;
+  $('model-name').textContent = typeof window.router.setDefaults === 'function' ? 'codex-local' : s.defaultModel;
+  $('connect-note').textContent = typeof window.router.setDefaults === 'function' ? `codex-local 当前对应 ${s.defaultModel}，默认强度 ${s.defaultReasoningEffort}。启用工具调用。` : '选择 OpenAI 兼容协议，启用工具调用。';
   $('account-tag').textContent = s.account?.type === 'chatgpt' ? '已登录' : '未登录';
   $('account-plan').textContent = s.account?.planType ? `ChatGPT ${s.account.planType[0].toUpperCase() + s.account.planType.slice(1)}` : '未连接';
-  $('account-description').textContent = s.account?.type === 'chatgpt' ? `${s.models.length} 个目录模型 · 默认 ${s.defaultModel} · 推理强度高（${s.defaultReasoningEffort}）` : '请先打开 Codex，使用 ChatGPT 账户登录。';
+  $('account-description').textContent = s.account?.type === 'chatgpt' ? `${s.models.length} 个目录模型 · 默认 ${s.defaultModel} · 推理强度 ${effortLabels[s.defaultReasoningEffort] || s.defaultReasoningEffort}（${s.defaultReasoningEffort}）` : '请先打开 Codex，使用 ChatGPT 账户登录。';
   if (document.activeElement !== $('port')) $('port').value = s.port;
   if (document.activeElement !== $('binary')) $('binary').value = s.binary;
   $('resolved-binary').textContent = s.resolvedBinary ? `实际程序：${s.resolvedBinary}` : '填写 codex 可自动查找本机安装；也可以选择实际的 codex.exe。';
@@ -61,8 +94,14 @@ $('toggle').onclick = () => run($('toggle'), async () => {
 });
 $('test').onclick = () => run($('test'), async () => { const reply = await window.router.test(); $('test-result').textContent = `Codex 响应：${reply}`; show('连接测试成功，本机服务已收到 Codex 的真实响应。'); });
 $('save').onclick = () => run($('save'), async () => { render(await window.router.save({ port: Number($('port').value), binary: $('binary').value })); show('设置已保存。'); });
+$('default-model').onchange = () => { draft = { model:$('default-model').value, effort:$('default-effort').value }; renderDefaults(state); };
+$('default-effort').onchange = () => { draft = { model:$('default-model').value, effort:$('default-effort').value }; renderDefaults(state); };
+$('apply-defaults').onclick = () => run($('apply-defaults'), async () => {
+  const updated = await window.router.setDefaults($('default-model').value, $('default-effort').value);
+  draft = null; render(updated); show('模型和推理强度已应用，新请求立即生效。');
+});
 $('browse').onclick = async () => { const binary = await window.router.chooseBinary(); if (binary) $('binary').value = binary; };
 for (const button of document.querySelectorAll('[data-copy]')) button.onclick = () => run(button, async () => { await window.router.copy(button.dataset.copy); show('已复制到剪贴板。'); });
 $('copy-all').onclick = () => run($('copy-all'), async () => { await window.router.copy('all'); show('已复制 Base URL、API Key 和模型名称。'); });
-window.router.refresh().then(render).catch(e => show(e.message, true));
+window.router.refresh().then(render).catch(e => show(String(e?.message || e), true));
 setInterval(async () => { if (!working) render(await window.router.status()); }, 3000);

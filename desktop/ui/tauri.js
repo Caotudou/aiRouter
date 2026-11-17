@@ -9,5 +9,6 @@ if (window.__TAURI__) {
     test: () => invoke('router_test'),
     chooseBinary: () => invoke('router_choose_binary'),
     save: (settings) => invoke('router_save', { settings }),
+    setDefaults: (model, effort) => invoke('router_set_defaults', { model, effort }),
   });
 }

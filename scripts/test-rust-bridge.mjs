@@ -20,6 +20,20 @@ try {
   assert.equal((await fetch(`${url}/v1/models`)).status, 401);
   assert.equal((await fetch(`${url}/v1/models`, {headers: {...headers, origin:'https://example.com'}})).status, 403);
   assert.equal((await (await fetch(`${url}/v1/models`,{headers})).json()).data[1].id, 'gpt-6.1-sol');
+  child.stdin.write(JSON.stringify({model:'selected-model',effort:'medium'})+'\n');
+  assert.equal((await once(lines,'line'))[0], 'DEFAULTS_UPDATED');
+  const selected = await (await request({model:'codex-local',messages:msg('inspect-settings selected')})).json();
+  assert.equal(selected.model,'selected-model');
+  assert.equal(selected.choices[0].message.content,'model=selected-model;effort=medium');
+  const override = await (await request({model:'client-model',reasoning_effort:'high',messages:msg('inspect-settings override')})).json();
+  assert.equal(override.choices[0].message.content,'model=client-model;effort=high');
+  const nested = await (await request({reasoning:{effort:'xhigh'},messages:msg('inspect-settings nested')})).json();
+  assert.equal(nested.choices[0].message.content,'model=selected-model;effort=xhigh');
+  const selectedStream = await (await request({model:'codex-local',messages:msg('inspect-settings stream'),stream:true})).text();
+  assert.match(selectedStream,/"model":"selected-model"/);
+  assert.match(selectedStream,/effort=medium/);
+  child.stdin.write(JSON.stringify({model:'gpt-6.1-sol',effort:'high'})+'\n');
+  assert.equal((await once(lines,'line'))[0], 'DEFAULTS_UPDATED');
   const base = {model:'gpt-6.1-sol', messages:msg('hello'), tool_choice:null};
   const first = await (await request(base)).json();
   assert.equal(first.choices[0].message.content, 'fixture response');
@@ -34,10 +48,8 @@ try {
   assert.equal(calls.length,2);
   const history = [...messages,output.choices[0].message];
   const response = call => ({role:'tool',tool_call_id:call.id,content:'ok'});
-  const mismatch = await request({messages:[...history,...calls.map(response)],tools:tools.slice(0,1)});
-  assert.equal(mismatch.status,409);
   assert.equal((await request({messages:[...history,response(calls[0])],tools})).status,400);
-  const finished = await (await request({messages:[...history,...calls.map(response)],tools})).json();
+  const finished = await (await request({messages:[...history,...calls.map(response)],tools:tools.slice(0,1)})).json();
   assert.equal(finished.choices[0].message.content,'tools complete');
   // Streaming clients can rewrite assistant content when returning tool output.
   const streamedMessages = msg('two-tools streamed-content-rewrite');
@@ -50,10 +62,7 @@ try {
   const results = streamedCalls.map(response);
   const changedTool = structuredClone(changedAssistant);
   changedTool.tool_calls[0].function.arguments = '{"modified":true}';
-  assert.equal((await request({messages:[...streamedMessages,changedTool,...results],tools})).status,409);
-  assert.equal((await request({messages:[...changedHistory,{...results[0],tool_call_id:'unknown'},results[1]],tools})).status,409);
-  assert.equal((await request({messages:[...msg('different earlier history'),changedAssistant,...results],tools})).status,409);
-  const resumed = await (await request({messages:[...changedHistory,...results],tools,stream:true})).text();
+  const resumed = await (await request({messages:[...msg('different earlier history'),changedTool,...results],tools,stream:true})).text();
   assert.match(resumed,/tools complete/); assert.match(resumed,/\[DONE\]/);
   const singleMessages = msg('one-tool original-case');
   const singleStream = await (await request({messages:singleMessages,tools,stream:true})).text();
@@ -64,6 +73,31 @@ try {
   const clientHistory = [...singleMessages,{role:'assistant',content:null,tool_calls:singleCalls},response(singleCalls[0])];
   const singleResult = await (await request({messages:clientHistory,tools,stream:true})).text();
   assert.match(singleResult,/tools complete/); assert.match(singleResult,/\[DONE\]/);
+  // Reproduce WorkBuddy sending a tool result and a new user message together.
+  const combinedMessages = msg('one-tool with-follow-up');
+  const combinedStart = await (await request({messages:combinedMessages,tools})).json();
+  const combinedCall = combinedStart.choices[0].message.tool_calls[0];
+  const combinedHistory = [...combinedMessages,combinedStart.choices[0].message];
+  const followUp = {role:'user',content:'new user instruction'};
+  assert.equal((await request({messages:[...combinedHistory,{...response(combinedCall),tool_call_id:'unknown'},followUp],tools})).status,400);
+  const combinedResult = await (await request({messages:[...combinedHistory,response(combinedCall),followUp],tools,stream:true})).text();
+  assert.match(combinedResult,/user instruction received/); assert.match(combinedResult,/\[DONE\]/);
+  // Also match a changed streamed assistant content when the user follows the tool result.
+  const changedStart = await (await request({messages:msg('one-tool with-rewrite-follow-up'),tools})).json();
+  const changedCall = changedStart.choices[0].message.tool_calls[0];
+  const changedMessage = {...changedStart.choices[0].message,content:null};
+  const changedCombined = await (await request({messages:[...msg('one-tool with-rewrite-follow-up'),changedMessage,response(changedCall),followUp],tools})).json();
+  assert.match(changedCombined.choices[0].message.content,/user instruction received/);
+  // WorkBuddy may omit the steered user message in its next history snapshot.
+  const chainMessages = msg('chain-tools history reshaped');
+  const chainStart = await (await request({messages:chainMessages,tools})).json();
+  const chainCall = chainStart.choices[0].message.tool_calls[0];
+  const firstChainHistory = [...chainMessages,chainStart.choices[0].message,response(chainCall)];
+  const chainNext = await (await request({messages:[...firstChainHistory,followUp],tools})).json();
+  const nextCall = chainNext.choices[0].message.tool_calls[0];
+  const reshapedHistory = [...firstChainHistory,chainNext.choices[0].message,response(nextCall)];
+  const chainDone = await (await request({messages:reshapedHistory,tools,stream:true})).text();
+  assert.match(chainDone,/user instruction received/); assert.match(chainDone,/\[DONE\]/);
   // History reconstructed after the bridge no longer has the original session.
   const oldHistory = [
     {role:'user',content:'older task'},
@@ -75,18 +109,20 @@ try {
   const replay = await request({messages:oldHistory,tools});
   assert.equal(replay.status,200);
   assert.equal((await replay.json()).choices[0].message.content,'fixture response');
-  const unresolved = await request({messages:oldHistory.slice(0,3),tools});
-  assert.equal(unresolved.status,409);
+  const recovered = await request({messages:oldHistory.slice(0,3),tools});
+  assert.equal(recovered.status,200);
+  const custom = await request({messages:msg('custom model passthrough'),model:'not-in-catalog',reasoning_effort:'custom'});
+  assert.equal(custom.status,200);
   const failed = await request({messages:msg('fail-turn')});
   assert.equal(failed.status,502); assert.match(JSON.stringify(await failed.json()),/fixture failure/);
   const rawLogs = readFileSync(diagnosticFile,'utf8');
   assert(!rawLogs.includes('private-prompt-sentinel'));
   assert(!rawLogs.includes('smoke-test-token-0123456789abcdef'));
   const events = rawLogs.trim().split('\n').map(JSON.parse);
-  assert(events.some(e => e.event === 'session_not_found'));
-  assert(events.some(e => e.event === 'session_lookup' && e.data.candidates.some(c => c.same_model && !c.same_tools && c.matching_tool_result_count === 2)));
+  assert(events.some(e => e.event === 'session_lookup' && e.data.matched && e.data.candidates.some(c => c.same_model && !c.same_tools && c.matching_tool_result_count === 2)));
   assert(events.some(e => e.event === 'response_ready' && e.data.tool_call_count === 2));
   assert(events.some(e => e.event === 'session_lookup' && e.data.match_kind === 'pending_tool'));
+  assert(events.some(e => e.event === 'turn_steered' && e.data.user_message_count === 1));
   console.log('Rust HTTP fixture: authentication, origins, models, continuation, SSE, parallel tools and errors passed.');
 } finally {
   child.stdin.end('stop\n');

@@ -1,4 +1,9 @@
-use ai_router_core::{bridge::Bridge, diagnostics::Diagnostics, rpc::CodexRpc, server};
+use ai_router_core::{
+    bridge::{Bridge, RoutingDefaults},
+    diagnostics::Diagnostics,
+    rpc::CodexRpc,
+    server,
+};
 use std::{path::PathBuf, sync::Arc};
 
 #[tokio::main]
@@ -22,8 +27,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
     println!("READY");
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
+    loop {
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line)? == 0 || line.trim() == "stop" {
+            break;
+        }
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
+            if let (Some(model), Some(effort)) = (value["model"].as_str(), value["effort"].as_str())
+            {
+                bridge.set_defaults(RoutingDefaults {
+                    model: model.into(),
+                    reasoning_effort: effort.into(),
+                });
+                println!("DEFAULTS_UPDATED");
+            }
+        }
+    }
     handle.stop().await;
     bridge.close().await;
     rpc.stop().await?;

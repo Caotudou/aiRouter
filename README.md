@@ -11,7 +11,7 @@ WorkBuddy → http://127.0.0.1:18321/v1 → AI Router → codex app-server → O
 ## 使用
 
 1. 在本机 Codex 中使用 ChatGPT 登录。终端运行 `codex login status` 可检查状态。
-2. 打开 `dist/AI-Router-0.2.3-Tauri-Windows.exe`。Windows 需有 Microsoft Edge WebView2 Runtime。
+2. 打开 `dist/AI-Router-0.2.6-Tauri-Windows.exe`。Windows 需有 Microsoft Edge WebView2 Runtime。
 3. 在 AI Router 点击 **启动服务**，再点击 **测试连接**。测试会产生一条真实 Codex 请求。
 4. WorkBuddy → 设置 → 模型 → 自定义 API / Custom，选择 OpenAI 兼容协议：
 
@@ -19,15 +19,15 @@ WorkBuddy → http://127.0.0.1:18321/v1 → AI Router → codex app-server → O
 |---|---|
 | Base URL | `http://127.0.0.1:18321/v1` |
 | API Key | 点击 AI Router 的 **复制** 获取本机密钥 |
-| 模型名称 | `gpt-6.1-sol` |
-| 默认推理强度 | 高（`high`），客户端不填写时由服务自动应用 |
+| 模型名称 | `codex-local`，跟随 AI Router 中选择的默认模型 |
+| 默认推理强度 | 在 AI Router 中选择；客户端不填写时使用，初始为高（`high`） |
 | 工具调用 | 开启 |
 | 图片输入 | 需要时开启，取决于选用模型 |
 | 自定义协议开关 | 保持关闭，使用标准 `/chat/completions` 路径 |
 
 如果 WorkBuddy 开启了自定义协议并要求完整请求地址，填写 `http://127.0.0.1:18321/v1/chat/completions`；不要让客户端重复拼接 `/v1`。
 
-也可以填写账户模型目录中的具体模型名。目录不代表所有请求均获授权，实际推理结果决定是否可用。
+在“模型与推理强度”中选择当前账户目录里的模型和它支持的强度，点击“应用选择”后新请求立即生效。也可以在 WorkBuddy 填写具体模型名，届时客户端指定的模型优先；客户端明确指定的推理强度也会优先。目录不代表所有请求均获授权，实际推理结果决定是否可用。
 
 关闭 AI Router 窗口即停止服务。首版没有系统托盘、后台常驻、开机启动、多账户或局域网分享。
 
@@ -41,14 +41,14 @@ WorkBuddy → http://127.0.0.1:18321/v1 → AI Router → codex app-server → O
 
 ## 接口和兼容范围
 
-- `GET /v1/models`：模型目录，包含指向 `gpt-6.1-sol` 的兼容别名 `codex-local`。不指定模型时也固定使用 `gpt-6.1-sol`。
+- `GET /v1/models`：模型目录，包含指向当前所选默认模型的别名 `codex-local`。不指定模型时同样使用所选默认模型。
 - `POST /v1/chat/completions`：文本、`image_url` 图片、非流式及 SSE 流式、`function` 工具。
 - `GET /health`：进程健康状态。上述接口均需要 `Authorization: Bearer <本机密钥>`。
 - WorkBuddy 的工具映射为 Codex `dynamicTools`；调用由 WorkBuddy 执行，结果通过原始 app-server 请求回传。单次可返回多个工具调用。
-- 同一会话继续时，模型、工具定义及此前消息应保持一致。会话仅在内存中保存，闲置 10 分钟清理，最多 24 个。已完成的工具历史可在服务重启后作为文本上下文恢复；正在等待的工具调用无法恢复，请新建 WorkBuddy 任务。
+- 活动工具调用按调用 ID 找回会话，允许客户端调整历史消息。会话仅在内存中保存，闲置 10 分钟清理，最多 24 个。服务重启或会话清理后，无法恢复原生工具调用，会将客户端提供的历史作为文本重建上下文；这不是原生会话的完整恢复。
 - 新请求自带的旧 assistant 消息会作为带角色标记的文本上下文传入；已经匹配的会话沿用 Codex 原生历史。首版不提供任意历史的原始 Responses item 导入。
 - 支持 `tool_choice=auto/none`；暂不支持强制工具、音频、Responses API、JSON Schema 输出、`n>1`、logprobs、seed、stop。
-- `reasoning_effort` 默认 `high`，客户端显式传入时按模型返回的可选值验证并采用该值。`temperature`、`top_p`、`max_tokens`、`max_completion_tokens` 等采样/输出上限参数不映射，实际生成遵循 Codex；不要用这些字段作为费用上限。
+- `reasoning_effort` 使用界面所选默认值，初始为 `high`；客户端显式传入时采用客户端值，Codex 负责判断是否支持。`temperature`、`top_p`、`max_tokens`、`max_completion_tokens` 等采样/输出上限参数不映射，实际生成遵循 Codex；不要用这些字段作为费用上限。
 - 180 秒为单次接口响应超时；客户端断开会取消该会话的 Codex 任务。
 - Codex app-server 和动态工具属于实验接口，升级 Codex 后应重新运行真实冒烟测试。
 
