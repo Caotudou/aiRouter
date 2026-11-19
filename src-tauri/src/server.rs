@@ -1,4 +1,4 @@
-use crate::bridge::{sanitize_error, Bridge, BridgeError};
+use crate::bridge::{sanitize_error, Bridge, BridgeError, StreamDelta};
 use axum::{
     body::{to_bytes, Body, Bytes},
     extract::{Request, State},
@@ -178,9 +178,8 @@ async fn handle(State(api): State<Api>, req: Request) -> Response {
     };
     let body = api.bridge.apply_defaults(body);
     if body["stream"] != true {
-        let (delta_tx, _delta_rx) = mpsc::unbounded_channel();
         let bridge = api.bridge.clone();
-        let task = tokio::spawn(async move { bridge.complete(body, Some(delta_tx)).await });
+        let task = tokio::spawn(async move { bridge.complete(body, None).await });
         return match task.await.unwrap_or_else(|e| {
             Err(BridgeError {
                 status: 502,
@@ -230,7 +229,8 @@ async fn handle(State(api): State<Api>, req: Request) -> Response {
                 _ = output_tx.closed() => { drop(delta_rx); let _ = task.await; return; }
                 _ = heartbeat.tick() => { if output_tx.send(Ok(Bytes::from_static(b": keep-alive\n\n"))).await.is_err() { drop(delta_rx); let _ = task.await; return; } }
                 delta = delta_rx.recv() => match delta {
-                    Some(delta) => if output_tx.send(Ok(Bytes::from(chunk(json!({"content":delta}), Value::Null)))).await.is_err() { drop(delta_rx); let _ = task.await; return; },
+                    Some(StreamDelta::Content(delta)) => if output_tx.send(Ok(Bytes::from(chunk(json!({"content":delta}), Value::Null)))).await.is_err() { drop(delta_rx); let _ = task.await; return; },
+                    Some(StreamDelta::ReasoningSummary(delta)) => if output_tx.send(Ok(Bytes::from(chunk(json!({"reasoning_content":delta}), Value::Null)))).await.is_err() { drop(delta_rx); let _ = task.await; return; },
                     None => break,
                 }
             }

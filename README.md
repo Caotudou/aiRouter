@@ -11,7 +11,7 @@ WorkBuddy → http://127.0.0.1:18321/v1 → AI Router → codex app-server → O
 ## 使用
 
 1. 在本机 Codex 中使用 ChatGPT 登录。终端运行 `codex login status` 可检查状态。
-2. 打开 `dist/AI-Router-0.2.7-Tauri-Windows.exe`。Windows 需有 Microsoft Edge WebView2 Runtime。
+2. 打开 `dist/AI-Router-0.2.8-Tauri-Windows.exe`。Windows 需有 Microsoft Edge WebView2 Runtime。
 3. 在 AI Router 点击 **启动服务**，再点击 **测试连接**。测试会产生一条真实 Codex 请求。
 4. WorkBuddy → 设置 → 模型 → 自定义 API / Custom，选择 OpenAI 兼容协议：
 
@@ -27,7 +27,7 @@ WorkBuddy → http://127.0.0.1:18321/v1 → AI Router → codex app-server → O
 
 如果 WorkBuddy 开启了自定义协议并要求完整请求地址，填写 `http://127.0.0.1:18321/v1/chat/completions`；不要让客户端重复拼接 `/v1`。
 
-在“模型与推理强度”中选择当前账户目录里的模型和它支持的强度，点击“应用选择”后新请求立即生效。也可以在 WorkBuddy 填写具体模型名，届时客户端指定的模型优先；客户端明确指定的推理强度也会优先。目录不代表所有请求均获授权，实际推理结果决定是否可用。
+在“模型与推理强度”中选择当前账户目录里的模型和它支持的强度，点击“应用选择”后新请求立即生效。也可以在 WorkBuddy 填写具体模型名，届时客户端指定的模型优先；客户端明确指定的推理强度也会优先。目录不代表所有请求均获授权，实际推理结果决定是否可用。WorkBuddy 自定义模型需启用“推理模式”能力，AI Router 会把 Codex 提供的推理摘要通过 `reasoning_content` 流式转发。
 
 关闭窗口会将应用收到系统托盘，已启动的服务会继续运行。可从托盘菜单重新打开窗口，或选择“退出并停止服务”完全退出。应用目前不会随系统登录自动启动。
 

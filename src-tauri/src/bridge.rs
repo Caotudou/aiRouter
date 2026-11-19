@@ -64,6 +64,13 @@ pub struct RoutingDefaults {
     pub model: String,
     pub reasoning_effort: String,
 }
+
+#[derive(Debug, Clone)]
+pub enum StreamDelta {
+    Content(String),
+    ReasoningSummary(String),
+}
+
 impl Default for RoutingDefaults {
     fn default() -> Self {
         Self {
@@ -246,7 +253,7 @@ impl Bridge {
     pub async fn complete(
         &self,
         body: Value,
-        deltas: Option<mpsc::UnboundedSender<String>>,
+        deltas: Option<mpsc::UnboundedSender<StreamDelta>>,
     ) -> Result<Value, BridgeError> {
         let body = self.apply_defaults(body);
         let messages = protocol::normalize_messages(&body["messages"])
@@ -506,7 +513,7 @@ impl Bridge {
                 Ok(Err(BridgeError {status:499,code:"cancelled",message:"客户端已取消请求。".into()}))
             }
         };
-        let (content, calls, usage) = match result {
+        let (content, reasoning_summary, calls, usage) = match result {
             Ok(Ok(result)) => result,
             Ok(Err(e)) => {
                 self.diagnostic("session_removed", json!({"reason":e.code}));
@@ -527,17 +534,21 @@ impl Bridge {
                 });
             }
         };
-        let mut message = json!({"role":"assistant","content":if content.is_empty(){Value::Null}else{json!(content)}});
+        let mut history_message = json!({"role":"assistant","content":if content.is_empty(){Value::Null}else{json!(content)}});
         if !calls.is_empty() {
-            message["tool_calls"] = json!(calls);
+            history_message["tool_calls"] = json!(calls);
         }
         s.history = messages;
-        s.history.push(message.clone());
+        s.history.push(history_message.clone());
         if let Ok(mut history) = entry.history.write() {
             *history = s.history.clone();
         }
         s.touched = Instant::now();
         self.diagnostic("response_ready", json!({"history_count":s.history.len(),"tool_call_count":calls.len(),"pending_tool_count":s.pending.len()}));
+        let mut message = history_message;
+        if !reasoning_summary.is_empty() {
+            message["reasoning_content"] = json!(reasoning_summary);
+        }
         let created = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -559,9 +570,10 @@ impl Bridge {
     async fn collect(
         &self,
         s: &mut Session,
-        deltas: Option<mpsc::UnboundedSender<String>>,
-    ) -> Result<(String, Vec<Value>, Option<Value>), BridgeError> {
+        deltas: Option<mpsc::UnboundedSender<StreamDelta>>,
+    ) -> Result<(String, String, Vec<Value>, Option<Value>), BridgeError> {
         let mut text = String::new();
+        let mut reasoning_summary = String::new();
         let mut usage = None;
         let mut flush_at = None;
         loop {
@@ -586,7 +598,24 @@ impl Bridge {
                     if let Some(delta) = event["params"]["delta"].as_str() {
                         text.push_str(delta);
                         if let Some(tx) = &deltas {
-                            if tx.send(delta.into()).is_err() {
+                            if tx.send(StreamDelta::Content(delta.into())).is_err() {
+                                return Err(BridgeError {
+                                    status: 499,
+                                    code: "cancelled",
+                                    message: "客户端已取消请求。".into(),
+                                });
+                            }
+                        }
+                    }
+                }
+                "item/reasoning/summaryTextDelta" => {
+                    if let Some(delta) = event["params"]["delta"].as_str() {
+                        reasoning_summary.push_str(delta);
+                        if let Some(tx) = &deltas {
+                            if tx
+                                .send(StreamDelta::ReasoningSummary(delta.into()))
+                                .is_err()
+                            {
                                 return Err(BridgeError {
                                     status: 499,
                                     code: "cancelled",
@@ -660,7 +689,7 @@ impl Bridge {
             pending.reported = true;
             calls.push(pending.call.clone());
         }
-        Ok((text, calls, usage))
+        Ok((text, reasoning_summary, calls, usage))
     }
     async fn abort(&self, s: &Session) {
         if let Some(id) = &s.turn_id {
