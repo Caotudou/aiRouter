@@ -434,8 +434,10 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("AI Router 启动失败");
 
-    app.run(|app, event| {
-        if let tauri::RunEvent::ExitRequested { api, .. } = event {
+    app.run(|app, event| match event {
+        #[cfg(target_os = "macos")]
+        tauri::RunEvent::Reopen { .. } => show_main_window(app),
+        tauri::RunEvent::ExitRequested { api, .. } => {
             let state = app.state::<AppState>();
             if state.exit_complete.load(Ordering::Acquire) {
                 return;
@@ -454,6 +456,7 @@ pub fn run() {
                 app.exit(0);
             });
         }
+        _ => {}
     });
 }
 

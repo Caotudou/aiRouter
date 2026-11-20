@@ -48,9 +48,10 @@ pub fn resolve_codex(configured: &str) -> Result<PathBuf, String> {
 
 fn platform_candidates() -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Some(home) = env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }) {
+    let home = env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
+    if let Some(home) = home.as_deref() {
         paths.push(
-            Path::new(&home)
+            Path::new(home)
                 .join(".local")
                 .join("bin")
                 .join(executable_name()),
@@ -89,13 +90,19 @@ fn platform_candidates() -> Vec<PathBuf> {
         }
     }
     #[cfg(target_os = "macos")]
-    for item in [
-        "/opt/homebrew/bin/codex",
-        "/usr/local/bin/codex",
-        "/Applications/Codex.app/Contents/Resources/codex",
-        "/Applications/ChatGPT.app/Contents/Resources/codex",
-    ] {
-        paths.push(PathBuf::from(item));
+    {
+        paths.extend(["/opt/homebrew/bin/codex", "/usr/local/bin/codex"].map(PathBuf::from));
+        let mut app_dirs = vec![PathBuf::from("/Applications")];
+        if let Some(home) = home.as_deref() {
+            app_dirs.push(Path::new(home).join("Applications"));
+        }
+        for app_dir in app_dirs {
+            for app in ["Codex.app", "ChatGPT.app"] {
+                let resources = app_dir.join(app).join("Contents/Resources");
+                paths.push(resources.join("codex-cli/CodexCLI.app/Contents/MacOS/codex"));
+                paths.push(resources.join("codex"));
+            }
+        }
     }
     paths
 }
