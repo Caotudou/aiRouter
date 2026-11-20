@@ -58,10 +58,19 @@ fn main() {
         }
         match method {
             "initialize" => emit(json!({"id":id,"result":{}})),
+            "config/read" => emit(json!({"id":id,"result":{"config":{"mcp_servers":{"inherited.fixture":{"command":"fixture-only-command"}}}}})),
             "model/list" => emit(
                 json!({"id":id,"result":{"data":[{"model":"gpt-6.1-sol","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}],"nextCursor":null}}),
             ),
             "thread/start" => {
+                let config = &message["params"]["config"];
+                if config["mcp_servers"]["inherited.fixture"] != json!({"enabled":false})
+                    || config["features.plugins"] != false
+                    || config["features.shell_tool"] != false
+                {
+                    emit(json!({"id":id,"error":{"code":-32602,"message":"fixture expected inherited tools to be disabled"}}));
+                    continue;
+                }
                 thread += 1;
                 models.insert(
                     format!("thread-{thread}"),
@@ -95,6 +104,8 @@ fn main() {
                         );
                     }
                     awaiting = Some((current.as_str().unwrap().into(), count));
+                } else if input.contains("native-tool-fixture") {
+                    emit(json!({"method":"item/started","params":{"threadId":current,"item":{"type":"mcpToolCall","arguments":{"value":"omit-native-tool-arguments"}}}}));
                 } else if input.contains("fail-turn") {
                     emit(
                         json!({"method":"turn/completed","params":{"threadId":current,"turn":{"status":"failed","error":{"message":"fixture failure"}}}}),

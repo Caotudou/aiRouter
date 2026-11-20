@@ -135,6 +135,27 @@ fn can_replay_finished_tools(messages: &[Value]) -> bool {
     outstanding.is_empty()
 }
 
+fn workbuddy_tool_config(effective: &Value) -> Value {
+    // Codex merges TOML tables, so an empty MCP table leaves inherited servers enabled.
+    let disabled_mcp = effective["config"]["mcp_servers"]
+        .as_object()
+        .into_iter()
+        .flat_map(|servers| servers.keys())
+        .map(|name| (name.clone(), json!({"enabled":false})))
+        .collect::<serde_json::Map<_, _>>();
+    json!({
+        "mcp_servers": disabled_mcp,
+        "features.shell_tool": false,
+        "features.unified_exec": false,
+        "features.multi_agent": false,
+        "features.multi_agent_v2": false,
+        "features.apps": false,
+        "features.plugins": false,
+        "skills.include_instructions": false,
+        "web_search": "disabled"
+    })
+}
+
 pub struct Bridge {
     rpc: Arc<CodexRpc>,
     cwd: PathBuf,
@@ -403,7 +424,32 @@ impl Bridge {
                 .map(|m| protocol::text_content(&m["content"]))
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            let thread = self.rpc.request("thread/start", json!({"model":model,"modelProvider":"openai","ephemeral":true,"cwd":self.cwd,"environments":[],"approvalPolicy":"untrusted","sandbox":"read-only","baseInstructions":format!("{INSTRUCTIONS}\n\n{systems}"),"developerInstructions":"All computer actions must be delegated to WorkBuddy dynamic tools. Do not use built-in tools.","dynamicTools":dynamic_tools,"config":{"features.shell_tool":false,"features.multi_agent":false,"features.apps":false,"web_search":"disabled"}})).await.map_err(BridgeError::failure)?;
+            let effective_config = match self
+                .rpc
+                .request("config/read", json!({"cwd":self.cwd,"includeLayers":false}))
+                .await
+            {
+                Ok(config) => config,
+                Err(_) => {
+                    self.diagnostic("tool_config_read_failed", json!({}));
+                    Value::Null
+                }
+            };
+            let thread = self
+                .rpc
+                .request(
+                    "thread/start",
+                    json!({
+                        "model": model, "modelProvider": "openai", "ephemeral": true,
+                        "cwd": self.cwd, "environments": [], "approvalPolicy": "untrusted", "sandbox": "read-only",
+                        "baseInstructions": format!("{INSTRUCTIONS}\n\n{systems}"),
+                        "developerInstructions": "All computer actions must be delegated to WorkBuddy dynamic tools. Do not use built-in tools.",
+                        "dynamicTools": dynamic_tools,
+                        "config": workbuddy_tool_config(&effective_config)
+                    }),
+                )
+                .await
+                .map_err(BridgeError::failure)?;
             let id = thread["thread"]["id"]
                 .as_str()
                 .ok_or_else(|| BridgeError::failure("Codex 未返回会话 ID。"))?
@@ -705,7 +751,12 @@ impl Bridge {
                     ]
                     .contains(&event["params"]["item"]["type"].as_str().unwrap_or("")) =>
                 {
-                    return Err(BridgeError::failure("Codex 尝试使用内置工具，已中断。"))
+                    self.diagnostic("native_tool_blocked", json!({"item_type":event["params"]["item"]["type"]}));
+                    return Err(BridgeError {
+                        status: 502,
+                        code: "native_tool_blocked",
+                        message: "AI Router 已中止 Codex 的内置工具调用。工具操作需由 WorkBuddy 执行。".into(),
+                    });
                 }
                 method if event.get("id").is_some() && !method.is_empty() => {
                     self.rpc.send(json!({"id":event["id"],"error":{"code":-32601,"message":"Unsupported request"}})).await.map_err(BridgeError::failure)?;

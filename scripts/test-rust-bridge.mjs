@@ -138,14 +138,19 @@ try {
   assert.equal(custom.status,200);
   const failed = await request({messages:msg('fail-turn')});
   assert.equal(failed.status,502); assert.match(JSON.stringify(await failed.json()),/fixture failure/);
+  const nativeTool = await request({messages:msg('native-tool-fixture')});
+  assert.equal(nativeTool.status, 502);
+  assert.equal((await nativeTool.json()).error.code, 'native_tool_blocked');
   const rawLogs = readFileSync(diagnosticFile,'utf8');
   assert(!rawLogs.includes('private-prompt-sentinel'));
   assert(!rawLogs.includes('smoke-test-token-0123456789abcdef'));
+  assert(!rawLogs.includes('omit-native-tool-arguments'));
   const events = rawLogs.trim().split('\n').map(JSON.parse);
   assert(events.some(e => e.event === 'session_lookup' && e.data.matched && e.data.candidates.some(c => c.same_model && !c.same_tools && c.matching_tool_result_count === 2)));
   assert(events.some(e => e.event === 'response_ready' && e.data.tool_call_count === 2));
   assert(events.some(e => e.event === 'session_lookup' && e.data.match_kind === 'pending_tool'));
   assert(events.some(e => e.event === 'turn_steered' && e.data.user_message_count === 1));
+  assert(events.some(e => e.event === 'native_tool_blocked' && e.data.item_type === 'mcpToolCall'));
   console.log('Rust HTTP fixture: authentication, origins, models, continuation, SSE, usage, parallel tools and errors passed.');
 } finally {
   child.stdin.end('stop\n');

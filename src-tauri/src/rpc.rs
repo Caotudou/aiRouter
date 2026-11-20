@@ -31,7 +31,15 @@ impl CodexRpc {
     pub async fn start(binary: &Path, cwd: &Path) -> Result<Arc<Self>, String> {
         let mut command = Command::new(binary);
         command
-            .args(["app-server", "--listen", "stdio://", "-c", "mcp_servers={}"])
+            .args([
+                "app-server",
+                "--listen",
+                "stdio://",
+                "-c",
+                "features.plugins=false",
+                "-c",
+                "features.apps=false",
+            ])
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
