@@ -9,3 +9,4 @@ pub mod legacy_windows;
 pub mod protocol;
 pub mod rpc;
 pub mod server;
+pub mod usage;

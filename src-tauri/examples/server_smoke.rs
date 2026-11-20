@@ -3,6 +3,7 @@ use ai_router_core::{
     diagnostics::Diagnostics,
     rpc::CodexRpc,
     server,
+    usage::UsageStore,
 };
 use std::{path::PathBuf, sync::Arc};
 
@@ -19,7 +20,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(Diagnostics::open)
         .transpose()?
         .map(Arc::new);
-    let bridge = Arc::new(Bridge::with_diagnostics(rpc.clone(), cwd, diagnostics));
+    let mut bridge = Bridge::with_diagnostics(rpc.clone(), cwd, diagnostics);
+    if let Some(directory) = std::env::var_os("AI_ROUTER_TEST_USAGE_DIR") {
+        bridge = bridge.with_usage(Arc::new(UsageStore::new(directory.into())));
+    }
+    let bridge = Arc::new(bridge);
     let handle = server::start(
         bridge.clone(),
         "smoke-test-token-0123456789abcdef".into(),

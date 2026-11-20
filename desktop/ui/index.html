@@ -8,13 +8,15 @@
   <link rel="stylesheet" href="style.css">
   <script src="tauri.js" defer></script>
   <script src="app.js" defer></script>
+  <script src="usage.js" defer></script>
 </head>
 <body>
   <aside class="sidebar">
     <div class="brand"><span class="brand-symbol">↗</span><span>AI Router<small>LOCAL CODEX BRIDGE</small></span></div>
     <div class="nav-label">工作空间</div>
     <div class="nav-item" aria-current="page"><span>◈</span> 服务控制台</div>
-    <div class="sidebar-bottom"><span class="local-dot"></span> 仅本机连接<small>Desktop · v0.2.9</small></div>
+    <a class="usage-nav" id="usage-nav" href="#usage" hidden>用量统计</a>
+    <div class="sidebar-bottom"><span class="local-dot"></span> 仅本机连接<small>Desktop · v0.2.11</small></div>
   </aside>
   <main>
     <header><div><div class="eyebrow">CODEX × WORKBUDDY</div><h1>让本机 Codex，接入工作流。</h1><p>使用已登录的 ChatGPT 账户，为 WorkBuddy 提供模型服务。</p></div><button id="refresh" class="secondary">刷新状态 ↻</button></header>
@@ -22,7 +24,7 @@
     <section class="service panel" aria-labelledby="service-title">
       <div class="service-top"><div><div class="section-kicker">本机模型服务</div><h2 id="service-title"><span id="service-dot" class="status-dot"></span><span id="service-state">服务未启动</span></h2><p id="service-description">启动后，将下方接入信息填写到 WorkBuddy。</p></div><button id="toggle" class="primary">启动服务 <span>↗</span></button></div>
       <div class="connection-path"><span>WorkBuddy</span><span class="line">→</span><span class="path-active">AI Router</span><span class="line">→</span><span>本机 Codex</span><span class="path-tag">ChatGPT 额度</span></div>
-      <p class="footnote">关闭窗口会将 AI Router 收到系统托盘，已启动的服务会继续运行。需要完全退出时，请从托盘菜单选择“退出并停止服务”。</p>
+      <p class="footnote">关窗后服务继续运行。点击 macOS 菜单栏或 Windows 任务栏右下角的 AI Router 图标可恢复窗口。在图标菜单中选择“退出并停止服务”可完全退出。</p>
     </section>
     <section id="model-settings" class="panel model-settings" aria-labelledby="model-settings-title" hidden>
       <div class="panel-title"><div><h2 id="model-settings-title">模型与推理强度</h2><p>选择 Codex 处理请求时默认使用的模型与强度。</p></div></div>
@@ -38,6 +40,43 @@
       <section class="panel connect"><div class="panel-title"><h2>接入 WorkBuddy</h2><button id="copy-all" class="text-button">复制全部 ↗</button></div><p>设置 → 模型 → 自定义 API / Custom</p><div class="config-row"><label>Base URL</label><div><code id="base-url">http://127.0.0.1:18321/v1</code><button class="copy" data-copy="url" aria-label="复制 Base URL">复制</button></div></div><div class="config-row"><label>API Key</label><div><code>本机专用密钥 · ••••••••</code><button class="copy" data-copy="key" aria-label="复制本机 API Key">复制</button></div></div><div class="config-row"><label>模型名称</label><div><code id="model-name">codex-local</code><button class="copy" data-copy="model" aria-label="复制模型名称">复制</button></div></div><p id="connect-note" class="footnote">选择 OpenAI 兼容协议，启用工具调用。</p></section>
     </div>
     <section class="panel verification"><div><h2>验证接入链路</h2><p id="test-result">发送一条简短请求，检查 Codex 是否能正常响应。会使用少量额度。</p></div><button id="test" class="secondary" disabled>测试连接 →</button></section>
+    <details class="panel usage-panel" id="usage" hidden>
+      <summary>用量统计 <span>按小时</span></summary>
+      <div class="usage-controls">
+        <label for="usage-range">时间范围<select id="usage-range"><option value="24">最近 24 小时</option><option value="168">最近 7 天</option><option value="custom">自选时段</option></select></label>
+        <div id="usage-custom" class="usage-custom" hidden>
+          <label for="usage-start">开始<input id="usage-start" type="datetime-local" step="3600"></label>
+          <label for="usage-end">结束<input id="usage-end" type="datetime-local" step="3600"></label>
+        </div>
+      </div>
+      <p class="footnote">请求与 Token 来自经本机 AI Router 转发的客户端。只接入 WorkBuddy 时，这里即为 WorkBuddy 用量。</p>
+      <p class="usage-status" id="usage-status" role="status" aria-live="polite"></p>
+      <div id="usage-results" hidden>
+        <dl class="usage-totals">
+          <div><dt>请求数</dt><dd id="usage-requests">—</dd></div>
+          <div><dt>已上报 Token</dt><dd id="usage-tokens">—</dd></div>
+          <div><dt>输入 / 输出</dt><dd id="usage-in-out">—</dd></div>
+          <div><dt>缓存输入 Token</dt><dd id="usage-cached">—</dd></div>
+        </dl>
+        <div class="usage-charts">
+          <figure><figcaption>每小时 Token</figcaption><canvas id="usage-token-chart" role="img" aria-label="每小时已上报 Token 柱形图，具体数值见分时明细"></canvas></figure>
+          <figure>
+            <figcaption>ChatGPT 账户已用额度</figcaption>
+            <canvas id="usage-quota-chart" role="img" aria-label="账户已用额度趋势，具体数值见分时明细"></canvas>
+            <div class="usage-legend"><span class="quota-short">5 小时</span><span class="quota-weekly">每周</span></div>
+            <p class="footnote">额度包含同一 ChatGPT 账户的其他 Codex 用量。</p>
+          </figure>
+        </div>
+        <details class="usage-detail">
+          <summary>分时明细 <span>本机时间</span></summary>
+          <div class="usage-table-scroll"><table>
+            <thead><tr><th scope="col">小时</th><th scope="col">请求</th><th scope="col">输入</th><th scope="col">输出</th><th scope="col">缓存输入</th><th scope="col">总 Token</th><th scope="col">5 小时额度</th><th scope="col">每周额度</th></tr></thead>
+            <tbody id="usage-rows"></tbody>
+          </table></div>
+          <p class="footnote">工具续传计入请求数。Token 按 Codex 上报时间累加，缓存输入计入输入 Token。额度取每小时最后一次有效采样。</p>
+        </details>
+      </div>
+    </details>
     <details class="panel settings"><summary>连接设置与运行记录 <span>＋</span></summary><div class="settings-grid"><label>服务端口<input id="port" type="number" min="1024" max="65535" value="18321"></label><label>Codex 程序路径<div class="input-group"><input id="binary" value="codex" spellcheck="false"><button id="browse" class="secondary">选择</button></div></label><button id="save" class="secondary">保存设置</button></div><p id="resolved-binary" class="footnote"></p><p class="footnote">修改设置前请先停止服务。关闭窗口会将应用收到托盘，服务继续运行。</p><div class="log-heading">最近运行记录 <span id="sessions">0 个会话</span></div><div id="logs" class="logs">暂无运行记录</div></details>
     <footer><span>● 本机转接 · 模型推理仍通过网络访问 OpenAI</span><span>实验版 · 支持文本、图片与工具调用</span></footer>
   </main>

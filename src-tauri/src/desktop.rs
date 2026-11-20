@@ -5,6 +5,7 @@ use crate::{
     protocol::{DEFAULT_MODEL, DEFAULT_REASONING_EFFORT},
     rpc::CodexRpc,
     server::{self, ServerHandle},
+    usage::{UsageReport, UsageStore},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -52,6 +53,8 @@ struct Core {
     rpc: Option<Arc<CodexRpc>>,
     bridge: Option<Arc<Bridge>>,
     server: Option<ServerHandle>,
+    usage: Arc<UsageStore>,
+    quota_sampler: Option<tokio::task::JoinHandle<()>>,
     account: Value,
     quota: Value,
     models: Vec<Value>,
@@ -106,6 +109,7 @@ impl Core {
             }
             Err(e) => return Err(format!("无法读取本机密钥：{e}")),
         };
+        let usage = Arc::new(UsageStore::new(directory.join("usage")));
         Ok(Self {
             directory,
             settings,
@@ -114,6 +118,8 @@ impl Core {
             rpc: None,
             bridge: None,
             server: None,
+            usage,
+            quota_sampler: None,
             account: Value::Null,
             quota: Value::Null,
             models: Vec::new(),
@@ -153,11 +159,10 @@ impl Core {
         let diagnostics =
             Diagnostics::open(self.directory.join("logs").join("session-events.jsonl"))
                 .map_err(|e| format!("无法创建会话诊断日志：{e}"))?;
-        let bridge = Arc::new(Bridge::with_diagnostics(
-            rpc.clone(),
-            cwd,
-            Some(Arc::new(diagnostics)),
-        ));
+        let bridge = Arc::new(
+            Bridge::with_diagnostics(rpc.clone(), cwd, Some(Arc::new(diagnostics)))
+                .with_usage(self.usage.clone()),
+        );
         bridge.set_defaults(RoutingDefaults {
             model: self.settings.default_model.clone(),
             reasoning_effort: self.settings.default_reasoning_effort.clone(),
@@ -174,6 +179,9 @@ impl Core {
             let account=rpc.request("account/read",json!({"refreshToken":false})).await?;
             let models=self.bridge.as_ref().ok_or("服务未初始化")?.models().await.map_err(|e|e.message)?;
             let quota=rpc.request("account/rateLimits/read",json!({})).await.unwrap_or(Value::Null);
+            if account["account"]["type"] == "chatgpt" {
+                self.usage.record_quota(&quota).await;
+            }
             self.account=match account["account"].as_object() { Some(a)=>json!({"type":a.get("type"),"planType":a.get("planType")}),None=>Value::Null };
             self.models=models.into_iter().map(|m|json!({"model":m["model"],"displayName":m["displayName"],"isDefault":m["isDefault"],"defaultReasoningEffort":m["defaultReasoningEffort"],"supportedReasoningEfforts":m["supportedReasoningEfforts"]})).collect();
             self.quota=quota; Ok::<(),String>(())
@@ -195,6 +203,9 @@ impl Core {
           "activeSessions":if let Some(b)=&self.bridge {b.count().await}else{0}})
     }
     async fn stop(&mut self) {
+        if let Some(task) = self.quota_sampler.take() {
+            task.abort();
+        }
         if let Some(bridge) = self.bridge.take() {
             bridge.close().await;
         }
@@ -223,6 +234,13 @@ async fn router_status(state: State<'_, AppState>) -> Result<Value, String> {
     Ok(state.core.lock().await.status().await)
 }
 #[tauri::command]
+async fn router_usage(state: State<'_, AppState>, start: u64, end: u64) -> Result<UsageReport, String> {
+    let usage = state.core.lock().await.usage.clone();
+    tokio::task::spawn_blocking(move || usage.report(start, end))
+        .await
+        .map_err(|_| "无法读取用量记录。".to_string())?
+}
+#[tauri::command]
 async fn router_refresh(state: State<'_, AppState>) -> Result<Value, String> {
     let mut c = state.core.lock().await;
     c.refresh().await;
@@ -239,6 +257,7 @@ async fn router_start(state: State<'_, AppState>) -> Result<Value, String> {
         if c.account["type"] != "chatgpt" {
             return Err("请先在本机 Codex 中使用 ChatGPT 登录。".into());
         }
+        let rpc = c.rpc.clone().ok_or("Codex 尚未连接")?;
         c.server = Some(
             server::start(
                 c.bridge.clone().ok_or("服务未初始化")?,
@@ -247,6 +266,18 @@ async fn router_start(state: State<'_, AppState>) -> Result<Value, String> {
             )
             .await?,
         );
+        let usage = c.usage.clone();
+        c.quota_sampler = Some(tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(5 * 60)).await;
+                if !rpc.is_alive() {
+                    break;
+                }
+                if let Ok(quota) = rpc.request("account/rateLimits/read", json!({})).await {
+                    usage.record_quota(&quota).await;
+                }
+            }
+        }));
         c.log("started");
     }
     Ok(c.status().await)
@@ -321,7 +352,8 @@ async fn router_test(state: State<'_, AppState>) -> Result<String, String> {
     let result = tokio::time::timeout(std::time::Duration::from_secs(90), async move {
         let mut conn=tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST,port)).await.map_err(|e|e.to_string())?;
         let body=json!({"model":"codex-local","messages":[{"role":"user","content":"Reply with exactly: AI Router OK"}]}).to_string();
-        let request=format!("POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());
+        let test_header = server::CONNECTION_TEST_HEADER;
+        let request=format!("POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\n{test_header}: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());
         conn.write_all(request.as_bytes()).await.map_err(|e|e.to_string())?;
         let mut data=Vec::new();conn.read_to_end(&mut data).await.map_err(|e|e.to_string())?;
         let response=String::from_utf8(data).map_err(|e|e.to_string())?;
@@ -418,10 +450,17 @@ pub fn run() {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
+                #[cfg(target_os = "macos")]
+                let _ = window
+                    .app_handle()
+                    .set_activation_policy(tauri::ActivationPolicy::Accessory);
+                #[cfg(target_os = "windows")]
+                let _ = window.set_skip_taskbar(true);
             }
         })
         .invoke_handler(tauri::generate_handler![
             router_status,
+            router_usage,
             router_refresh,
             router_start,
             router_stop,
@@ -462,8 +501,12 @@ pub fn run() {
 
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        #[cfg(target_os = "macos")]
+        let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
         let _ = window.unminimize();
         let _ = window.show();
+        #[cfg(target_os = "windows")]
+        let _ = window.set_skip_taskbar(false);
         let _ = window.set_focus();
     }
 }

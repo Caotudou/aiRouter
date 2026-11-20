@@ -21,6 +21,8 @@ use tokio::{
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
+pub(crate) const CONNECTION_TEST_HEADER: &str = "x-ai-router-connection-test";
+
 #[derive(Clone)]
 struct Api {
     bridge: Arc<Bridge>,
@@ -168,6 +170,11 @@ async fn handle(State(api): State<Api>, req: Request) -> Response {
     {
         return error(415, "invalid_content_type", "请使用 application/json。");
     }
+    let usage = if req.headers().get(CONNECTION_TEST_HEADER).is_some_and(|value| value == "1") {
+        None
+    } else {
+        api.bridge.usage().cloned()
+    };
     let bytes = match to_bytes(req.into_body(), 16 * 1024 * 1024).await {
         Ok(b) => b,
         Err(_) => return error(413, "request_too_large", "请求内容超过 16 MB。"),
@@ -176,10 +183,13 @@ async fn handle(State(api): State<Api>, req: Request) -> Response {
         Ok(Value::Object(v)) => Value::Object(v),
         _ => return error(400, "invalid_json", "请求必须是有效 JSON 对象。"),
     };
+    if let Some(store) = &usage {
+        store.record_request().await;
+    }
     let body = api.bridge.apply_defaults(body);
     if body["stream"] != true {
         let bridge = api.bridge.clone();
-        let task = tokio::spawn(async move { bridge.complete(body, None).await });
+        let task = tokio::spawn(async move { bridge.complete_with_usage(body, None, usage.as_ref()).await });
         return match task.await.unwrap_or_else(|e| {
             Err(BridgeError {
                 status: 502,
@@ -221,7 +231,9 @@ async fn handle(State(api): State<Api>, req: Request) -> Response {
         let (delta_tx, mut delta_rx) = mpsc::unbounded_channel();
         let bridge = api.bridge.clone();
         let body_copy = body.clone();
-        let task = tokio::spawn(async move { bridge.complete(body_copy, Some(delta_tx)).await });
+        let task = tokio::spawn(async move {
+            bridge.complete_with_usage(body_copy, Some(delta_tx), usage.as_ref()).await
+        });
         let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
         heartbeat.tick().await;
         loop {

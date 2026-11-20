@@ -6,12 +6,17 @@ fn emit(value: Value) {
     println!("{value}");
     io::stdout().flush().unwrap();
 }
+fn emit_usage(thread: &Value, input: u64, output: u64, cached: u64) {
+    let total = json!({"inputTokens":input,"outputTokens":output,"cachedInputTokens":cached,"totalTokens":input+output});
+    emit(json!({"method":"thread/tokenUsage/updated","params":{"threadId":thread,"turnId":"turn-1","tokenUsage":{"total":total,"last":total}}}));
+}
 fn main() {
     let mut thread = 0u64;
     let mut models = std::collections::HashMap::<String, String>::new();
     let mut awaiting: Option<(String, usize)> = None;
     let mut steered = false;
     let mut chain_next = false;
+    let mut usage_threads = std::collections::HashSet::new();
     for line in io::stdin().lock().lines().map_while(Result::ok) {
         let Ok(message) = serde_json::from_str::<Value>(&line) else {
             continue;
@@ -36,6 +41,9 @@ fn main() {
                     } else {
                         "tools complete"
                     };
+                    if usage_threads.contains(&current) {
+                        emit_usage(&json!(current), 42, 8, 12);
+                    }
                     emit(
                         json!({"method":"item/agentMessage/delta","params":{"threadId":current,"delta":answer}}),
                     );
@@ -65,6 +73,11 @@ fn main() {
                 let current = &message["params"]["threadId"];
                 let input = message["params"]["input"].to_string();
                 emit(json!({"id":id,"result":{"turn":{"id":"turn-1"}}}));
+                if input.contains("usage-fixture") {
+                    usage_threads.insert(current.as_str().unwrap().to_owned());
+                    emit_usage(current, 20, 4, 6);
+                    emit_usage(current, 20, 4, 6);
+                }
                 if input.contains("two-tools")
                     || input.contains("one-tool")
                     || input.contains("chain-tools")

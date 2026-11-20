@@ -2,6 +2,7 @@ use crate::{
     diagnostics::Diagnostics,
     protocol::{self, DEFAULT_MODEL, DEFAULT_REASONING_EFFORT},
     rpc::CodexRpc,
+    usage::{Tokens, UsageStore},
 };
 use serde_json::{json, Value};
 use std::{
@@ -52,6 +53,7 @@ struct Session {
     turn_id: Option<String>,
     touched: Instant,
     done: bool,
+    usage_total: Tokens,
 }
 struct SessionEntry {
     identity: Value,
@@ -139,6 +141,7 @@ pub struct Bridge {
     sessions: Mutex<Vec<Arc<SessionEntry>>>,
     logs: Mutex<Vec<Value>>,
     diagnostics: Option<Arc<Diagnostics>>,
+    usage: Option<Arc<UsageStore>>,
     instance_id: String,
     defaults: std::sync::RwLock<RoutingDefaults>,
 }
@@ -165,10 +168,20 @@ impl Bridge {
             sessions: Mutex::new(Vec::new()),
             logs: Mutex::new(Vec::new()),
             diagnostics,
+            usage: None,
             instance_id,
             defaults: std::sync::RwLock::new(RoutingDefaults::default()),
         }
     }
+    pub fn with_usage(mut self, usage: Arc<UsageStore>) -> Self {
+        self.usage = Some(usage);
+        self
+    }
+
+    pub(crate) fn usage(&self) -> Option<&Arc<UsageStore>> {
+        self.usage.as_ref()
+    }
+
     pub fn set_defaults(&self, defaults: RoutingDefaults) {
         if let Ok(mut current) = self.defaults.write() {
             *current = defaults;
@@ -254,6 +267,15 @@ impl Bridge {
         &self,
         body: Value,
         deltas: Option<mpsc::UnboundedSender<StreamDelta>>,
+    ) -> Result<Value, BridgeError> {
+        self.complete_with_usage(body, deltas, None).await
+    }
+
+    pub(crate) async fn complete_with_usage(
+        &self,
+        body: Value,
+        deltas: Option<mpsc::UnboundedSender<StreamDelta>>,
+        usage_store: Option<&Arc<UsageStore>>,
     ) -> Result<Value, BridgeError> {
         let body = self.apply_defaults(body);
         let messages = protocol::normalize_messages(&body["messages"])
@@ -398,6 +420,7 @@ impl Bridge {
                     turn_id: None,
                     touched: Instant::now(),
                     done: false,
+                    usage_total: Tokens::default(),
                 }),
             });
             self.sessions.lock().await.push(entry.clone());
@@ -508,7 +531,7 @@ impl Bridge {
         }
         let cancelled = deltas.clone();
         let result = tokio::select! {
-            result = tokio::time::timeout(Duration::from_secs(180), self.collect(&mut s, deltas)) => result,
+            result = tokio::time::timeout(Duration::from_secs(180), self.collect(&mut s, deltas, usage_store)) => result,
             _ = async { if let Some(tx) = cancelled { tx.closed().await } else { std::future::pending::<()>().await } } => {
                 Ok(Err(BridgeError {status:499,code:"cancelled",message:"客户端已取消请求。".into()}))
             }
@@ -571,6 +594,7 @@ impl Bridge {
         &self,
         s: &mut Session,
         deltas: Option<mpsc::UnboundedSender<StreamDelta>>,
+        usage_store: Option<&Arc<UsageStore>>,
     ) -> Result<(String, String, Vec<Value>, Option<Value>), BridgeError> {
         let mut text = String::new();
         let mut reasoning_summary = String::new();
@@ -626,7 +650,15 @@ impl Bridge {
                     }
                 }
                 "thread/tokenUsage/updated" => {
-                    usage = Some(event["params"]["tokenUsage"]["last"].clone())
+                    let reported = &event["params"]["tokenUsage"];
+                    usage = Some(reported["last"].clone());
+                    if let Some(delta) = Tokens::from_total(&reported["total"])
+                        .and_then(|total| s.usage_total.take_increment(total))
+                    {
+                        if let Some(store) = usage_store {
+                            store.record_tokens(delta).await;
+                        }
+                    }
                 }
                 "item/tool/call" => {
                     let tool = event["params"]["tool"].as_str().unwrap_or("");

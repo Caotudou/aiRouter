@@ -3,13 +3,14 @@ import { once } from 'node:events';
 import { createInterface } from 'node:readline';
 import assert from 'node:assert/strict';
 import { resolve } from 'node:path';
-import { mkdirSync, readFileSync, unlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync } from 'node:fs';
 
 const suffix = process.platform === 'win32' ? '.exe' : '';
 const dir = resolve('src-tauri/target/debug/examples');
 mkdirSync(resolve('.local'), {recursive:true});
 const diagnosticFile = resolve('.local', `diagnostics-test-${process.pid}.jsonl`);
-const child = spawn(`${dir}/server_smoke${suffix}`, [`${dir}/fake_codex${suffix}`], { stdio: ['pipe', 'pipe', 'inherit'], windowsHide: true, env:{...process.env, AI_ROUTER_DIAGNOSTICS_PATH:diagnosticFile} });
+const usageDir = mkdtempSync(resolve('.local', 'usage-test-'));
+const child = spawn(`${dir}/server_smoke${suffix}`, [`${dir}/fake_codex${suffix}`], { stdio: ['pipe', 'pipe', 'inherit'], windowsHide: true, env:{...process.env, AI_ROUTER_DIAGNOSTICS_PATH:diagnosticFile, AI_ROUTER_TEST_USAGE_DIR:usageDir} });
 const lines = createInterface({ input: child.stdout });
 const url = 'http://127.0.0.1:18329';
 const headers = { authorization: 'Bearer smoke-test-token-0123456789abcdef', 'content-type': 'application/json' };
@@ -20,6 +21,28 @@ try {
   assert.equal((await fetch(`${url}/v1/models`)).status, 401);
   assert.equal((await fetch(`${url}/v1/models`, {headers: {...headers, origin:'https://example.com'}})).status, 403);
   assert.equal((await (await fetch(`${url}/v1/models`,{headers})).json()).data[1].id, 'gpt-6.1-sol');
+  const usageMessages = msg('one-tool usage-fixture do-not-store-this-prompt');
+  const usageTools = [{ type: 'function', function: { name: 'read', parameters: { type: 'object' } } }];
+  const firstUsage = await (await request({ messages: usageMessages, tools: usageTools, stream: true })).text();
+  const usageCall = firstUsage.split('\n').filter(line => line.startsWith('data: {'))
+    .map(line => JSON.parse(line.slice(6))).flatMap(chunk => chunk.choices[0].delta.tool_calls || [])
+    .map(({index, ...call}) => call)[0];
+  assert.ok(usageCall);
+  const resumedUsage = await (await request({
+    messages: [...usageMessages, { role: 'assistant', content: 'streamed text', tool_calls: [usageCall] }, { role: 'tool', tool_call_id: usageCall.id, content: 'ok' }],
+    tools: usageTools,
+  })).json();
+  assert.equal(resumedUsage.choices[0].message.content, 'tools complete');
+  assert.equal((await request({messages:msg('usage-fixture standalone')})).status, 200);
+  assert.equal((await request({messages:msg('usage-fixture self-test')}, {headers:{...headers, 'x-ai-router-connection-test':'1'}})).status, 200);
+  const rawUsage = readdirSync(usageDir).map(file => readFileSync(resolve(usageDir, file), 'utf8')).join('\n');
+  const usageRecords = rawUsage.split('\n').filter(Boolean).map(JSON.parse);
+  assert.equal(usageRecords.filter(record => record.type === 'request').length, 3);
+  const tokenRecords = usageRecords.filter(record => record.type === 'tokens');
+  assert.equal(tokenRecords.length, 3);
+  assert.equal(tokenRecords.reduce((sum, record) => sum + record.tokens.total, 0), 74);
+  assert.equal(tokenRecords.reduce((sum, record) => sum + record.tokens.cachedInput, 0), 18);
+  assert.ok(!rawUsage.includes('do-not-store-this-prompt') && !rawUsage.includes(headers.authorization));
   child.stdin.write(JSON.stringify({model:'selected-model',effort:'medium'})+'\n');
   assert.equal((await once(lines,'line'))[0], 'DEFAULTS_UPDATED');
   const selected = await (await request({model:'codex-local',messages:msg('inspect-settings selected')})).json();
@@ -123,9 +146,10 @@ try {
   assert(events.some(e => e.event === 'response_ready' && e.data.tool_call_count === 2));
   assert(events.some(e => e.event === 'session_lookup' && e.data.match_kind === 'pending_tool'));
   assert(events.some(e => e.event === 'turn_steered' && e.data.user_message_count === 1));
-  console.log('Rust HTTP fixture: authentication, origins, models, continuation, SSE, parallel tools and errors passed.');
+  console.log('Rust HTTP fixture: authentication, origins, models, continuation, SSE, usage, parallel tools and errors passed.');
 } finally {
   child.stdin.end('stop\n');
   await once(child,'exit');
   try { unlinkSync(diagnosticFile); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  rmSync(usageDir, {recursive:true, force:true});
 }

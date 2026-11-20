@@ -2,6 +2,7 @@ if (window.__TAURI__) {
   const invoke = window.__TAURI__.core.invoke;
   window.router = Object.freeze({
     status: () => invoke('router_status'),
+    usage: (start, end) => invoke('router_usage', { start, end }),
     refresh: () => invoke('router_refresh'),
     start: () => invoke('router_start'),
     stop: () => invoke('router_stop'),
